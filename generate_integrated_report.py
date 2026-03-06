@@ -30,7 +30,7 @@ class ModelInfo:
         self.name = name
         self.category = "other"
         self.architecture = "Unknown"
-        self.outputs = []  # List of (name, shape, status)
+        self.outputs = []  # List of (name, shape, status, images[])
         self.detection_images = []  # List of (filename, object_count)
         self.performance: Optional[PerformanceData] = None
 
@@ -219,12 +219,11 @@ def load_summary_report_data(base_path: str) -> Dict[str, ModelInfo]:
 
 
 def load_shape_from_parameters(model_name: str, base_path: str) -> Dict[str, List[int]]:
-    """Load output shapes from model's parameters.json in parent directory"""
-    parent_dir = os.path.dirname(base_path)
+    """Load output shapes from model's parameters.json"""
     shapes = {}
 
-    # Find parameters.json file in the model directory (e.g., ../atss_r101/*.parameters.json)
-    model_dir = os.path.join(parent_dir, model_name)
+    # Find parameters.json file in the model directory
+    model_dir = os.path.join(base_path, model_name)
 
     if os.path.exists(model_dir):
         for file in os.listdir(model_dir):
@@ -291,7 +290,16 @@ def scan_model_directory(base_path: str) -> List[ModelInfo]:
                 # Get shape from parameters.json if available
                 shape = shape_map.get(level, [])
                 shape_str = str(shape) if shape else "unknown"
-                model.outputs.append((level, shape_str, "success"))
+                # Status depends on whether shape was found
+                status = "success" if shape else "no params"
+                # Collect images from this output folder
+                output_images = []
+                output_folder = os.path.join(scan_path, output_dir)
+                if os.path.exists(output_folder):
+                    for img_file in sorted(os.listdir(output_folder)):
+                        if img_file.endswith((".jpg", ".png")):
+                            output_images.append((img_file, output_dir))
+                model.outputs.append((level, shape_str, status, output_images))
 
         # Get detection images
         for file in sorted(os.listdir(scan_path)):
@@ -376,14 +384,20 @@ def generate_html(models: List[ModelInfo], base_path: str, output_file: str = "i
         category_class = model.category
         tag_class = f"tag-{model.category}"
 
-        # Build outputs HTML
+        # Build outputs HTML with images
         outputs_html = ""
-        for output_name, shape, status in model.outputs:
+        for output_name, shape, status, images in model.outputs:
             outputs_html += f'''
                     <div class="output-item">
                         <strong>{output_name}</strong> - {shape}
-                        <span class="success">{status}</span>
                     </div>'''
+            # Add output images if available
+            if images:
+                outputs_html += '<div class="output-images">'
+                for img_file, folder_name in images[:4]:  # Max 4 images per output
+                    img_path = f"{model.name}/postprocess/{folder_name}/{img_file}"
+                    outputs_html += f'<div class="img-container"><a href="{img_path}" target="_blank"><img src="{img_path}" alt="{img_file}" loading="lazy"></a><span>{output_name}: {img_file}</span></div>'
+                outputs_html += '</div>'
 
         # Build detection gallery HTML
         gallery_html = ""
@@ -391,7 +405,7 @@ def generate_html(models: List[ModelInfo], base_path: str, output_file: str = "i
             gallery_html = '<div class="detection-gallery"><h4>Detection Results:</h4>'
             for img_file, obj_count in model.detection_images[:4]:  # Max 4 images
                 img_path = f"{model.name}/postprocess/{img_file}"
-                gallery_html += f'<div class="img-container"><img src="{img_path}" alt="{img_file}" loading="lazy"><span>{img_file}</span></div>'
+                gallery_html += f'<div class="img-container"><a href="{img_path}" target="_blank"><img src="{img_path}" alt="{img_file}" loading="lazy"></a><span>{img_file}</span></div>'
             gallery_html += '</div>'
 
         model_cards_html += f'''
@@ -440,7 +454,7 @@ def generate_html(models: List[ModelInfo], base_path: str, output_file: str = "i
             padding: 20px;
         }}
         .container {{
-            max-width: 1400px;
+            max-width: 1000px;
             margin: 0 auto;
         }}
         .header {{
@@ -644,17 +658,24 @@ def generate_html(models: List[ModelInfo], base_path: str, output_file: str = "i
             margin: 15px 0;
         }}
         .output-item {{
-            padding: 10px;
+            padding: 8px 10px;
             border-bottom: 1px solid #e0e0e0;
             display: flex;
-            justify-content: space-between;
+            gap: 10px;
             align-items: center;
         }}
         .output-item:last-child {{
             border-bottom: none;
         }}
         .success {{ color: #4CAF50; font-weight: 600; }}
+        .warning {{ color: #FF9800; font-weight: 600; }}
         .error {{ color: #f44336; font-weight: 600; }}
+        .output-images {{
+            margin: 10px 0 15px 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }}
         .detection-gallery {{
             margin: 15px 0;
         }}
@@ -677,6 +698,15 @@ def generate_html(models: List[ModelInfo], base_path: str, output_file: str = "i
         .img-container img {{
             max-width: 200px;
             display: block;
+            cursor: pointer;
+            transition: opacity 0.2s ease;
+        }}
+        .img-container a {{
+            display: block;
+            text-decoration: none;
+        }}
+        .img-container a:hover img {{
+            opacity: 0.8;
         }}
         .img-container span {{
             font-size: 12px;
@@ -1115,7 +1145,7 @@ def generate_markdown_summary(models: List[ModelInfo], base_path: str, output_fi
         lines.append("| Output | Shape | Status |")
         lines.append("|--------|-------|--------|")
 
-        for output_name, shape, status in model.outputs:
+        for output_name, shape, status, images in model.outputs:
             # Format shape for display
             if isinstance(shape, str):
                 shape_str = shape
@@ -1123,8 +1153,8 @@ def generate_markdown_summary(models: List[ModelInfo], base_path: str, output_fi
                 shape_str = str(shape)
             else:
                 shape_str = "unknown"
-            status_symbol = "✓" if status == "success" else "✗"
-            lines.append(f"| {output_name} | {shape_str} | {status_symbol} |")
+            status_symbol = "✓" if status == "success" else "⚠"
+            lines.append(f"| {output_name} | {shape_str} | {status_symbol} {status} |")
 
         lines.append("")
 
